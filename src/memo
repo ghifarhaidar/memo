@@ -1,0 +1,607 @@
+#!/bin/bash
+
+MEMO_DIR="${HOME}/.memo"
+CONFIG_FILE="${MEMO_DIR}/config"
+
+# Initialize memo system
+init_memo() {
+    if ! mkdir -p "$MEMO_DIR"; then
+        echo "Error: Could not create memo directory $MEMO_DIR" >&2
+        exit 1
+    fi
+    
+    # Create config file if it doesn't exist
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        cat > "$CONFIG_FILE" << 'CONFIG'
+# Memo configuration
+editor=${EDITOR:-nano}
+search_tool=grep
+CONFIG
+        echo "Initialized memo system in $MEMO_DIR"
+    fi
+}
+
+# Get config value
+get_config() {
+    local key="$1"
+    local value
+    value=$(grep "^$key=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2-)
+    
+    # If the value contains variables, evaluate them
+    if [[ "$value" =~ '\$' ]]; then
+        value=$(eval echo "$value")
+    fi
+    
+    echo "$value"
+}
+
+# Normalize category name (lowercase, no spaces, safe filename)
+normalize_category() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | sed 's/[^a-zA-Z0-9._-]//g'
+}
+
+# Show usage
+show_help() {
+    cat << 'EOF'
+Memo - Developer Note-taking Tool
+
+Usage:
+  memo add <note> [--category <cat>] [--desc <description>]  - Add a new memo
+  memo add                                                   - Interactive mode
+  memo list [category]                                       - List memos
+  memo search <query> [--category <category>]                - Search in memos
+  memo show <category> <index>                               - Show specific memo
+  memo show --category <category> <index>                    - Show specific memo
+  memo categories                                            - List all categories
+  memo stats                                                 - Show statistics
+  memo config                                                - Show configuration
+  memo --help                                                - Show this help
+
+Options:
+  -c, --category CATEGORY    Specify category for add/search/show commands
+  -d, --desc DESCRIPTION     Specify description for add command
+
+Examples:
+  memo add 'gdb breakpoint setup' --category cpp --desc 'debugging with gdb'
+  memo add 'docker compose restart' --category docker
+  memo search 'breakpoint'
+  memo search 'import' --category python
+  memo show cpp 1
+  memo show --category python 2
+  memo list cpp
+  memo list
+  memo stats
+EOF
+}
+
+# Add memo
+add_memo() {
+    local content="$1"
+    local category="$2"
+    local description="$3"
+    local category_file="${MEMO_DIR}/$(normalize_category "$category").memos"
+    
+    # Create memo entry
+    local memo_entry="=== MEMO ===\n"
+    memo_entry+="Description: $description\n"
+    memo_entry+="---\n"
+    memo_entry+="$content\n"
+    memo_entry+="=== END ===\n\n"
+    
+    # Append to category file
+    echo -e "$memo_entry" >> "$category_file"
+    
+    # Get the index of this memo
+    local index=$(grep -c "=== MEMO ===" "$category_file")
+    
+    echo "✓ Memo added to '$category_file' (index: $index)"
+    echo "  Description: $description"
+}
+
+# Add memo interactively
+add_memo_interactive() {
+    local editor=$(get_config "editor")
+    
+    echo "Adding new memo (interactive mode)"
+    echo "----------------------------------"
+    
+    # Get category
+    while true; do
+        echo -n "Category: "
+        read category
+        
+        if [[ -n "$category" ]]; then
+            break
+        fi
+        echo "Error: Category cannot be empty. Please enter a category."
+    done
+    
+    # Get description
+    while true; do
+        echo -n "Description: "
+        read description
+        
+        if [[ -n "$description" ]]; then
+            break
+        fi
+        echo "Error: Description cannot be empty. Please enter a description."
+    done
+    
+    # Create temp file for note
+    local temp_file=$(mktemp)
+    cat > "$temp_file" << TEMPLATE
+# Enter your memo content below this line
+# Commands, code snippets, notes, etc.
+
+TEMPLATE
+    
+    # Open editor
+    $editor "$temp_file"
+    
+    # Read the content
+    local content=$(sed -n '/^# Enter your memo content below this line/,${p}' "$temp_file" | tail -n +3)
+    
+    if [[ -z "$content" ]]; then
+        echo "No content entered. Aborting."
+        rm "$temp_file"
+        return 1
+    fi
+    
+    # Save the memo
+    add_memo "$content" "$category" "$description"
+    rm "$temp_file"
+}
+
+# Get all existing categories
+get_categories() {
+    find "$MEMO_DIR" -name "*.memos" -type f 2>/dev/null | while read -r file; do
+        basename "$file" .memos
+    done | sort
+}
+
+# List memos
+list_memos() {
+    local category="$1"
+    
+    if [[ -n "$category" ]]; then
+        # List specific category
+        list_category_memos "$category"
+    else
+        # List all categories with memo counts
+        echo "All Memos by Category:"
+        echo "======================"
+        get_categories | while read -r cat; do
+            local category_file="${MEMO_DIR}/${cat}.memos"
+            local count=$(count_memos_in_file "$category_file")
+            if [[ $count -gt 0 ]]; then
+                echo ""
+                echo "--- $cat ($count memos) ---"
+                list_category_memos "$cat" "compact"
+            fi
+        done
+    fi
+}
+
+# Count memos in a file
+count_memos_in_file() {
+    local file="$1"
+    if [[ -f "$file" ]]; then
+        grep -c "=== MEMO ===" "$file" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+# List memos from a specific category
+list_category_memos() {
+    local category="$1"
+    local format="${2:-full}"  # full or compact
+    local category_file="${MEMO_DIR}/$(normalize_category "$category").memos"
+    
+    if [[ ! -f "$category_file" ]] || [[ ! -s "$category_file" ]]; then
+        echo "No memos found in category '$category'"
+        return
+    fi
+    
+    local index=0
+    local in_memo=false
+    local current_desc=""
+    
+    echo "Memos in category: $category"
+    echo "============================="
+    
+    while IFS= read -r line; do
+        case "$line" in
+            "=== MEMO ===")
+                index=$((index + 1))
+                in_memo=true
+                if [[ "$format" == "full" ]]; then
+                    echo ""
+                    echo "=== Memo $index ==="
+                fi
+                ;;
+            "Description: "*)
+                if [[ $in_memo == true ]]; then
+                    current_desc="${line#Description: }"
+                    if [[ "$format" == "compact" ]]; then
+                        printf "%-3s %s\n" "$index." "$current_desc"
+                    else
+                        echo "Description: $current_desc"
+                        echo "---"
+                    fi
+                fi
+                ;;
+            "=== END ===")
+                if [[ $in_memo == true ]] && [[ "$format" == "full" ]]; then
+                    echo ""
+                fi
+                in_memo=false
+                ;;
+            "---")
+                # Skip separator
+                ;;
+            *)
+                if [[ $in_memo == true ]] && [[ "$format" == "full" ]] && [[ "$line" != "=== END ===" ]]; then
+                    echo "    $line"
+                fi
+                ;;
+        esac
+    done < "$category_file"
+
+    if [[ $index -eq 0 ]]; then
+        echo "No valid memos found in category '$category'"
+        return 1
+    fi
+}
+
+# Search memos (case insensitive)
+search_memos() {
+    local query="$1"
+    local category="$2"
+    local search_tool=$(get_config "search_tool")
+    
+    if [[ -z "$query" ]]; then
+        echo "Usage: memo search <query> [category]"
+        echo "       memo search <query> --category <category>"
+        return 1
+    fi
+    
+    echo "Searching for: '$query'"
+    if [[ -n "$category" ]]; then
+        echo "Category filter: '$category'"
+    fi
+    echo "==========================================="
+    
+    local total_matches=0
+    local categories_to_search
+
+    # Determine which categories to search
+    if [[ -n "$category" ]]; then
+        categories_to_search=$(normalize_category "$category")
+        # Verify category exists
+        if [[ ! -f "${MEMO_DIR}/${categories_to_search}.memos" ]]; then
+            echo "Category '$category' not found"
+            return 1
+        fi
+    else
+        categories_to_search=$(get_categories)
+    fi
+
+    while IFS= read -r category; do
+        local category_file="${MEMO_DIR}/${category}.memos"
+        local category_matches=0
+        
+        [[ ! -f "$category_file" ]] && continue
+
+        # Search in the file
+        if $search_tool -q -i "$query" "$category_file"; then
+            echo ""
+            echo "--- $category ---"
+            
+            local index=0
+            local in_memo=false
+            local current_desc=""
+            local memo_content=""
+            local match_found=false
+            
+            while IFS= read -r line; do
+                case "$line" in
+                    "=== MEMO ===")
+                        index=$((index + 1))
+                        in_memo=true
+                        memo_content=""
+                        match_found=false
+                        current_desc=""
+                        ;;
+                    "Description: "*)
+                        if [[ $in_memo == true ]]; then
+                            current_desc="${line#Description: }"
+                            # Check if description matches
+                            if echo "$current_desc" | $search_tool -q -i "$query"; then
+                                match_found=true
+                            fi
+                        fi
+                        ;;
+                    "=== END ===")
+                        if [[ $in_memo == true ]]; then
+                            # Check if content matches 
+                            if [[ $match_found == false ]] && echo "$memo_content" | $search_tool -q -i "$query"; then
+                                match_found=true
+                            fi
+                            
+                            if [[ $match_found == true ]]; then
+                                echo "[$index] $current_desc"
+                                category_matches=$((category_matches + 1))
+                                total_matches=$((total_matches + 1))
+                            fi
+                        fi
+                        in_memo=false
+                        ;;
+                    "---")
+                        # Skip separator
+                        ;;
+                    *)
+                        if [[ $in_memo == true ]]; then
+                            memo_content+="$line"$'\n'
+                            # Check if line matches
+                            if [[ $match_found == false ]] && echo "$line" | $search_tool -q -i "$query"; then
+                                match_found=true
+                            fi
+                        fi
+                        ;;
+                esac
+            done < "$category_file"
+        fi
+    done < <(echo "$categories_to_search")
+    
+    echo ""
+    if [[ $total_matches -eq 0 ]]; then
+        echo "No matches found for '$query'"
+    else
+        echo ""
+        echo "Found $total_matches matches"
+    fi
+}
+
+# Show specific memo
+show_memo() {
+    local category="$1"
+    local index="$2"
+    
+    local category_file="${MEMO_DIR}/$(normalize_category "$category").memos"
+    
+    if [[ ! -f "$category_file" ]]; then
+        echo "Category '$category' not found"
+        return 1
+    fi
+    
+    if ! [[ "$index" =~ ^[0-9]+$ ]]; then
+        echo "Error: Index must be a number"
+        return 1
+    fi
+
+    local current_index=0
+    local in_memo=false
+    local target_index=$index
+    local found=false
+    
+    while IFS= read -r line; do
+        case "$line" in
+            "=== MEMO ===")
+                current_index=$((current_index + 1))
+                in_memo=true
+                if [[ $current_index -eq $target_index ]]; then
+                    found=true
+                    echo "=== Memo $index ==="
+                fi
+                ;;
+            "=== END ===")
+                if [[ $found == true ]]; then
+                    echo "$line"
+                    return 0
+                fi
+                in_memo=false
+                ;;
+            *)
+                if [[ $found == true ]]; then
+                    echo "$line"
+                fi
+                ;;
+        esac
+    done < "$category_file"
+    
+    if [[ $found == false ]]; then
+        echo "Memo #$index not found in category '$category'"
+        local total=$(count_memos_in_file "$category_file")
+        if [[ $total -eq 0 ]]; then
+            echo "No memos found in this category"
+        else
+            echo "Available memos: 1 to $total"
+        fi
+        return 1
+    fi
+}
+
+# List categories
+list_categories() {
+    echo "Available categories:"
+    echo "===================="
+    get_categories | while read -r category; do
+        local count=$(count_memos_in_file "${MEMO_DIR}/${category}.memos")
+        printf "%-20s (%d memo%s)\n" "$category" "$count" "$( ((count != 1)) && echo s )"
+    done
+}
+
+# Show statistics
+show_stats() {
+    local total_memos=0
+    local total_categories=0
+    
+    echo "Memo Statistics"
+    echo "==============="
+    
+    while IFS= read -r category; do
+        local count=$(count_memos_in_file "${MEMO_DIR}/${category}.memos")
+        if [[ $count -gt 0 ]]; then
+            printf "%-20s: %d memo%s\n" "$category" "$count" "$( ((count != 1)) && echo s )"
+            total_memos=$((total_memos + count))
+            total_categories=$((total_categories + 1))
+        fi
+    done < <(get_categories)
+    
+    echo "==============="
+    echo "Total: $total_memos memo$( ((total_memos != 1)) && echo s ) in $total_categories categor$( ((total_categories != 1)) && echo ies || echo y )"
+}
+
+# Show configuration
+show_config() {
+    echo "Current configuration:"
+    echo "====================="
+    
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cat "$CONFIG_FILE"
+        echo ""
+        echo "Storage location: $MEMO_DIR"
+    else
+        echo "No configuration file found at $CONFIG_FILE"
+        echo "Using default settings"
+    fi
+}
+
+# Main execution
+main(){
+    init_memo
+
+    case "$1" in
+        add|a)
+            shift
+            if [[ $# -eq 0 ]]; then
+                add_memo_interactive
+            else
+                local content=""
+                local category=""
+                local description=""
+                
+                # Parse arguments
+                while [[ $# -gt 0 ]]; do
+                    case $1 in
+                        --category|-c)
+                            category="$2"
+                            shift 2
+                            ;;
+                        --desc|-d)
+                            description="$2"
+                            shift 2
+                            ;;
+                        *)
+                            # Assume any non-flag argument is the content
+                            if [[ -z "$content" ]]; then
+                                content="$1"
+                            else
+                                echo "Warning: Extra argument '$1' will be included in content" >&2
+                                content="$content $1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                
+                if [[ -z "$category" ]] || [[ -z "$description" ]]; then
+                    echo "Error: Both --category and --desc are required for command-line mode"
+                    echo "Use 'memo add' for interactive mode or provide both flags"
+                    exit 1
+                fi
+                
+                add_memo "$content" "$category" "$description"
+            fi
+            ;;
+        list|ls|l)
+            list_memos "$2"
+            ;;
+        search|s)
+            shift
+            local query=""
+            local category=""
+
+            # Parse arguments for search
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --category|-c)
+                        category="$2"
+                        shift 2
+                        ;;
+                    *)
+                        query="$1"
+                        shift
+                        ;;
+                esac
+            done
+
+            if [[ -z "$query" ]]; then
+                echo "Error: Search query is required"
+                echo "Usage: memo search <query> [--category <category>]"
+                exit 1
+            fi
+
+            search_memos "$query" "$category"
+            ;;
+        show|sh)
+            shift
+            local category=""
+            local index=""
+
+            # Parse arguments for show
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --category|-c)
+                        category="$2"
+                        shift 2
+                        ;;
+                    *)
+                        if [[ -z "$category" ]]; then
+                            category="$1"
+                        elif [[ -z "$index" ]]; then
+                            index="$1"
+                        else
+                            echo "Error: Too many arguments"
+                            echo "Usage: memo show --category <category> <index>"
+                            exit 1
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+
+            if [[ -z "$category" ]] || [[ -z "$index" ]]; then
+                echo "Error: Category and index are required"
+                echo "Usage: memo show --category <category> <index>"
+                exit 1
+            fi
+
+            show_memo "$category" "$index"
+            ;;
+        categories|cats)
+            list_categories
+            ;;
+        stats)
+            show_stats
+            ;;
+        config|cfg)
+            show_config
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        *)
+            if [[ $# -eq 0 ]]; then
+                show_help
+            else
+                echo "Unknown command: $1"
+                echo "Use 'memo --help' for usage information"
+                exit 1
+            fi
+            ;;
+    esac
+}
+
+main "$@"
