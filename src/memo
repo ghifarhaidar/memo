@@ -52,7 +52,7 @@ Usage:
   memo search <query> [--category <category>]                - Search in memos
   memo show <category> <index>                               - Show specific memo
   memo show --category <category> <index>                    - Show specific memo
-  memo delete --category <category> [index]                  - Show all memos in categoty (or just one)
+  memo delete --category <category> [index]                  - delete all memos in categoty (or just one)
   memo categories                                            - List all categories
   memo stats                                                 - Show statistics
   memo config                                                - Show configuration
