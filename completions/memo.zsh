@@ -7,6 +7,7 @@ _memo() {
         'list:List all memos' 
         'search:Search memos'
         'show:Show memo details'
+        'delete:Delete memo or all category'
         'categories:List categories'
         'stats:Show statistics'
         'config:Configure settings'

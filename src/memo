@@ -48,10 +48,11 @@ Memo - Developer Note-taking Tool
 Usage:
   memo add <note> [--category <cat>] [--desc <description>]  - Add a new memo
   memo add                                                   - Interactive mode
-  memo list [category]                                       - List memos
+  memo list [--category <category>]                          - List memos
   memo search <query> [--category <category>]                - Search in memos
   memo show <category> <index>                               - Show specific memo
   memo show --category <category> <index>                    - Show specific memo
+  memo delete --category <category> [index]                  - Show all memos in categoty (or just one)
   memo categories                                            - List all categories
   memo stats                                                 - Show statistics
   memo config                                                - Show configuration
@@ -67,8 +68,9 @@ Examples:
   memo search 'breakpoint'
   memo search 'import' --category python
   memo show cpp 1
-  memo show --category python 2
-  memo list cpp
+  memo show --category python 2  
+  memo delete --category python 2
+  memo list --category cpp
   memo list
   memo stats
 EOF
@@ -422,6 +424,79 @@ show_memo() {
     fi
 }
 
+# delete memos in category (or just one)
+delete(){
+    local category="$1"
+    local index="$2"
+
+    local category_file="${MEMO_DIR}/$(normalize_category "$category").memos"
+    
+    if [[ ! -f "$category_file" ]]; then
+        echo "Category '$category' not found"
+        return 1
+    fi
+    
+    # If no index provided, delete entire category file
+    if [[ -z "$index" ]]; then
+        rm "$category_file"
+        echo "Category '$category' deleted successfully"
+        return 0
+    fi
+
+    # Validate index is a number
+    if ! [[ "$index" =~ ^[0-9]+$ ]]; then
+        echo "Error: Index must be a number"
+        return 1
+    fi
+
+    local current_index=0
+    local in_target_memo=false
+    local target_index=$index
+    local found=false
+    local temp_file="${category_file}.tmp"
+
+    {
+        while IFS= read -r line; do
+            case "$line" in
+                "=== MEMO ===")
+                    current_index=$((current_index + 1))
+                    if [[ $current_index -eq $target_index ]]; then
+                        in_target_memo=true
+                        found=true
+                    fi
+                    if [[ $in_target_memo == false ]]; then
+                        echo "$line"
+                    fi
+                    ;;
+                "=== END ===")
+                    if [[ $in_target_memo == false ]]; then
+                        echo "$line"
+                    fi
+                    in_target_memo=false
+                    ;;
+                *)
+                    if [[ $in_target_memo == false ]]; then
+                        echo "$line"
+                    fi
+                    ;;
+            esac
+        done < "$category_file"
+    } > "$temp_file"
+
+
+    
+    if [[ $found == false ]]; then
+        rm "$temp_file"
+        echo "Error: Memo with index $index not found in category '$category'"
+        return 1
+    fi
+
+
+    # Replace original file with temp file
+    mv "$temp_file" "$category_file"
+    echo "Memo $index deleted from category '$category'"
+}
+
 # List categories
 list_categories() {
     echo "Available categories:"
@@ -516,7 +591,31 @@ main(){
             fi
             ;;
         list|ls|l)
-            list_memos "$2"
+            shift
+            local category=""
+            
+            # Parse arguments for list
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --category|-c)
+                        category="$2"
+                        shift 2
+                        ;;
+                    *)
+                        # If no flag provided, treat as category
+                        if [[ -z "$category" ]]; then
+                            category="$1"
+                        else
+                            echo "Error: Too many arguments"
+                            echo "Usage: memo list [--category <category>]"
+                            exit 1
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+            
+            list_memos "$category"
             ;;
         search|s)
             shift
@@ -579,6 +678,59 @@ main(){
             fi
 
             show_memo "$category" "$index"
+            ;;
+        delete|del)
+            shift
+            local category=""
+            local index=""
+
+            # Parse arguments for show
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --category|-c)
+                        category="$2"
+                        shift 2
+                        ;;
+                    *)
+                        if [[ -z "$category" ]]; then
+                            category="$1"
+                        elif [[ -z "$index" ]]; then
+                            index="$1"
+                        else
+                            echo "Error: Too many arguments"
+                            echo "Usage: memo delete --category <category> [index]"
+                            exit 1
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+
+            if [[ -z "$category" ]]; then
+                echo "Error: Category is required"
+                echo "Usage: memo delete --category <category> [index]"
+                exit 1
+            fi
+
+            # Confirmation logic
+            if [[ -z "$index" ]]; then
+                # Deleting entire category
+                echo "Warning: You are about to delete the entire category: '$category'"
+                read -p "Are you sure you want to continue? (y/N): " confirm
+                if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                    echo "Deletion cancelled."
+                    exit 0
+                fi
+            else
+                # Deleting specific item
+                echo "Warning: You are about to delete item $index from category: '$category'"
+                read -p "Are you sure you want to continue? (y/N): " confirm
+                if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                    echo "Deletion cancelled."
+                    exit 0
+                fi
+            fi
+            delete "$category" "$index"
             ;;
         categories|cats)
             list_categories

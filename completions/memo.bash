@@ -3,11 +3,11 @@ _memo() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="add list search show categories stats config help"
+    local commands="add list search show delete categories stats config help"
 
     case "${prev}" in
         --category|-c)
-            # Complete categories for add/search/show commands
+            # Complete categories for add/search/show/delete commands
             local categories=()
             if [[ -d "$HOME/.memo" ]]; then
                 while IFS= read -r file; do
